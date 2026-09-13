@@ -1,0 +1,19 @@
+# Add this row to an agent preset's agent.cordis.yml.
+# The row registers into the host `tools` registry and contributes one prompt
+# section, so it publishes no service and needs no `isolate` realm.
+- id: symbol-index
+  name: dsh-tool-symbol-index
+  config:
+    toolName: find_symbol
+    # every field below is optional; these are the defaults
+    guidanceSection: true
+    maxFiles: 20000
+    maxFileBytes: 2000000
+    maxIndexEntries: 300000
+    indexTtlMs: 600000
+    maxSitesPerSymbol: 12
+    maxTargetNames: 400
+    maxTextSites: 60
+    maxMentionSites: 12
+    maxOutputChars: 14000
+    timeoutMs: 30000

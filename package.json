@@ -1,0 +1,39 @@
+{
+  "name": "dsh-tool-symbol-index",
+  "version": "2.0.0",
+  "description": "find_symbol: answer symbol questions for a source tree in one call — definitions, both sides of every impl, scoped negative verdicts, and a grep-parity text search. A Cordis plugin row for DeepSeek Harness agent presets.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "agent-preset",
+    "code-search",
+    "symbol-index",
+    "rust",
+    "tree-sitter"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-system-prompt": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-system-prompt": { "optional": true }
+  }
+}
