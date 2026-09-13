@@ -94,6 +94,28 @@ see `impl Window { … }` — which is nevertheless an impl of `Window`.
 Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms, text scan
 ~110 ms.
 
+## Status: known delivery issue on the reference deployment
+
+The plugin code is complete and verified (see below), but on **one** DSH deployment it has not
+yet been observed to reach an agent's tool catalog. The evidence, so nobody repeats it:
+
+- a fresh child agent on a preset containing this row gets the plugin's **prompt section**
+  (order 116) but **not** its tool;
+- the plugin's own diagnostic confirms `ctx.tools.register()` returned normally;
+- a separate control proves the mechanism works: disabling the `tool-bash` **package** row
+  removed `bash` from the same child, so preset rows *do* deliver tools;
+- the failure reproduces identically with the row as a relative file, an absolute path, and a
+  package name; with a minimal hand-rolled probe tool registered from the same `apply()`; with
+  and without `ctx.effect`; with a `~standard` `Config`, a minimal `Config` and no `Config`;
+  with and without a `default` export; and across clean process restarts.
+
+So the shape of the plugin matches the working package rows and the row form is not the
+variable. What is left is the tool-registry layer/view path inside DSH, which needs debugging
+harness-side. **Read the section above as "the plugin is correct", not "it is installed and
+working"** — verify with one child agent asking for `find_symbol` before relying on it. The
+most promising workaround, if you hit this, is to register the tool against the child's own
+scope at composition time rather than from a preset row.
+
 ## Honest limitations
 
 - **Regex parsing, not a parser.** `impl … for …` inside a doc comment or string still
