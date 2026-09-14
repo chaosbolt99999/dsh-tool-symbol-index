@@ -89,14 +89,31 @@ Two consequences are built into this plugin:
 
 Rust, TypeScript/JavaScript, Python and Go are indexed; the extension set is configurable.
 
-## Replacing `grep` at the tool level — implemented, but **experimental**
+## Replacing `grep` at the tool level
 
-> **Do not enable this yet.** On the reference deployment, turning `provideSearchTools` on
-> while disabling `tool-fs-search` makes the row's *named* tool stop reaching agents: `grep`
-> and `glob` arrive, `find_symbol` does not, even though all three are registered by the same
-> `apply()` and the diagnostic logs a successful registration. Reverting the flag restores
-> nothing on its own; the exact interaction is still being bisected. Ship with
-> `provideSearchTools` **off** and the built-in `grep`/`glob` in place.
+> **Resolved 2026-09-14 — the earlier "do not enable" warning was a misattribution.**
+> This section previously warned that turning `provideSearchTools` on made `find_symbol`
+> stop reaching agents. It did not. `find_symbol` was already invisible on that path, for a
+> reason that has nothing to do with this plugin or with the harness: the delegating
+> `tool-subagent-preset` row's `toolFilter.allow`, in the preset plugin's `cordis.patch.yml`,
+> listed `bash, read, write, edit, glob, grep, read_image, crew_wait, todo_write` and did not
+> list `find_symbol`. A filter is a **global-tool mask**, so every name it omits is removed
+> from the child's view even though this row registers it and the preset's order-115 section
+> tells the child to use it. `grep` and `glob` arrived because they were on the list; the
+> named tool did not because it was not — which is exactly the observed split, and why
+> reverting the flag restored nothing.
+>
+> Two independent checks pin the cause. **Differential:** the same preset, plane and process
+> deliver `find_symbol` to a crew role, whose allow-list (Settings → Plugins → crews) *does*
+> name it, and withhold it from a `subagent_preset` child, whose list does not. **Static:**
+> composing the boot tree prints the row's effective filter, and it is the list above —
+> `node scripts/render-composition.mjs web tool-subagent-preset` (in the preset plugin).
+> The fix is one name on that list, applied there; nothing in this package or in the harness
+> needed to change, and `provideSearchTools` was never implicated.
+>
+> The replacement still pairs with disabling `tool-fs-search` (see below), and it has not yet
+> been re-measured end to end with `find_symbol` visible — the earlier live runs could not have
+> measured it, because the tool under test was being filtered out of the catalog.
 
 Set `provideSearchTools: true` and the row registers **drop-in `grep` and `glob`** beside
 `find_symbol`. They keep the same call shapes, so nothing about how an agent works has to
