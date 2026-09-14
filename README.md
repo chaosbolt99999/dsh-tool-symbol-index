@@ -89,7 +89,14 @@ Two consequences are built into this plugin:
 
 Rust, TypeScript/JavaScript, Python and Go are indexed; the extension set is configurable.
 
-## Replacing `grep` at the tool level
+## Replacing `grep` at the tool level — implemented, but **experimental**
+
+> **Do not enable this yet.** On the reference deployment, turning `provideSearchTools` on
+> while disabling `tool-fs-search` makes the row's *named* tool stop reaching agents: `grep`
+> and `glob` arrive, `find_symbol` does not, even though all three are registered by the same
+> `apply()` and the diagnostic logs a successful registration. Reverting the flag restores
+> nothing on its own; the exact interaction is still being bisected. Ship with
+> `provideSearchTools` **off** and the built-in `grep`/`glob` in place.
 
 Set `provideSearchTools: true` and the row registers **drop-in `grep` and `glob`** beside
 `find_symbol`. They keep the same call shapes, so nothing about how an agent works has to
