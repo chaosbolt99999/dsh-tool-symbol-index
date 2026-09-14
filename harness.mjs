@@ -195,6 +195,7 @@ export function mockContext(fs = realFs, captured = {}) {
     tools: {
       register(definition) {
         captured.tool = definition
+        captured.all = (captured.all ?? []).concat([definition])
         return () => {}
       },
     },
@@ -226,5 +227,5 @@ export async function loadTool(modulePath, config = {}) {
   }
   const { ctx, captured } = mockContext()
   module.apply(ctx, validated.value)
-  return { tool: captured.tool, sections: captured.sections, module }
+  return { tool: captured.tool, sections: captured.sections, module, capturedAll: captured.all ?? [captured.tool] }
 }

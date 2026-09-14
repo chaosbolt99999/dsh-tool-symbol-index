@@ -672,3 +672,108 @@ test('a genuinely capped target list says CAPPED instead of COMPLETE', async () 
   assert.doesNotMatch(text, /COMPLETE list/)
   rmSync(root, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// The drop-in grep/glob replacement (config.provideSearchTools).
+// ---------------------------------------------------------------------------
+
+evictIndexes()
+test('provideSearchTools registers drop-in grep and glob', async () => {
+  const off = await loadTool(MODULE, {})
+  assert.deepEqual((off.sections ?? []).length, 1)
+  const plain = await loadTool(MODULE, {})
+  assert.equal(plain.tool.name, 'find_symbol')
+
+  const on = await loadTool(MODULE, { provideSearchTools: true })
+  const names = (on.capturedAll ?? []).map(entry => entry.name).sort()
+  assert.deepEqual(names, ['find_symbol', 'glob', 'grep'])
+  // The row's own tool is still the LAST registration, so nothing that reads
+  // `captured.tool` (or a preset row named by config) sees a replacement.
+  assert.equal(on.tool.name, 'find_symbol')
+})
+
+evictIndexes()
+test('the replacement grep carries scope evidence, exact counts and a hard missing-path error', async () => {
+  const root = fixtureTree({
+    'a.rs': 'pub fn alpha() {}\n// TODO: fix\n',
+    'b.rs': '// TODO: fix again\n',
+    'c.py': '# TODO: python\n',
+  })
+  const { capturedAll } = await loadTool(MODULE, { provideSearchTools: true })
+  const grep = capturedAll.find(entry => entry.name === 'grep')
+  assert.equal(typeof grep.execute, 'function')
+  assertRegistrationSchemas(grep)
+
+  // Exact total, capped rows.
+  const value = await grep.execute({ pattern: 'TODO', path: root }, mockExec(root))
+  assert.deepEqual(validateSubset(grep.output.schema, value), [])
+  assert.equal(value.count, 3)
+  assert.equal(value.files, 3)
+  assert.equal(value.sites.length, 3)
+  const text = grep.output.render({}, value)[0].text
+  assert.match(text, /^grep "TODO" · 3 match\(es\) in 3 file\(s\)/)
+  assert.match(text, /^SEARCHED: /m)
+  assert.match(text, /^coverage: /m)
+
+  // A negative says its scope is the whole basis for the answer.
+  const none = await grep.execute({ pattern: 'nothing-here-xyz', path: root }, mockExec(root))
+  assert.equal(none.count, 0)
+  assert.match(grep.output.render({}, none)[0].text, /negative is final for that scope/)
+
+  // Regex mode.
+  const rx = await grep.execute({ pattern: 'TO+DO', regex: true, path: root }, mockExec(root))
+  assert.equal(rx.count, 3)
+
+  // A missing path is a hard error that names the nearest existing directory,
+  // exactly like find_symbol — never an empty result.
+  await assert.rejects(
+    () => grep.execute({ pattern: 'TODO', path: root + '/nope.rs' }, mockExec(root)),
+    (error) => {
+      // The message names the tool the caller actually used, and says nothing
+      // was searched — the whole point for a drop-in grep.
+      assert.match(error.message, /^grep: NOTHING WAS SEARCHED/)
+      assert.match(error.message, /nearest existing directory/)
+      assert.match(error.message, /no file was read/)
+      return true
+    },
+  )
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the replacement glob serves the walked files and explains exclusions', async () => {
+  const root = fixtureTree({
+    'src/a.rs': 'fn a() {}\n',
+    'src/deep/b.rs': 'fn b() {}\n',
+    'Cargo.toml': '[package]\n',
+    'notes.md': 'x\n',
+  })
+  const { capturedAll } = await loadTool(MODULE, { provideSearchTools: true })
+  const glob = capturedAll.find(entry => entry.name === 'glob')
+  assertRegistrationSchemas(glob)
+
+  const all = await glob.execute({ pattern: '**/*.rs', path: root }, mockExec(root))
+  assert.deepEqual(validateSubset(glob.output.schema, all), [])
+  assert.deepEqual(all.paths, ['src/a.rs', 'src/deep/b.rs'])
+
+  // A basename-only pattern matches at any depth.
+  const base = await glob.execute({ pattern: '*.rs', path: root }, mockExec(root))
+  assert.equal(base.count, 2)
+
+  // A single star does not cross a separator.
+  const shallow = await glob.execute({ pattern: 'src/*.rs', path: root }, mockExec(root))
+  assert.deepEqual(shallow.paths, ['src/a.rs'])
+
+  // Non-source files must be found: serving glob from the index's allow-list
+  // would silently lose Cargo.toml, which is a capability regression against
+  // the built-in this replaces.
+  const config = await glob.execute({ pattern: '*.toml', path: root }, mockExec(root))
+  assert.deepEqual(config.paths, ['Cargo.toml'])
+  const anyMd = await glob.execute({ pattern: '**/*.md', path: root }, mockExec(root))
+  assert.deepEqual(anyMd.paths, ['notes.md'])
+
+  const text = glob.output.render({}, all)[0].text
+  assert.match(text, /^glob "\*\*\/\*\.rs" · 2 file\(s\)/)
+  assert.match(text, /^coverage: /m)
+  rmSync(root, { recursive: true, force: true })
+})

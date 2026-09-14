@@ -85,8 +85,62 @@ Two consequences are built into this plugin:
 | text search | `query` for literal or regex, with an exact total |
 | mention sites | `mentions: true` instead of grepping for uses |
 | no re-walk cost | process-wide index pool; later questions are nearly free |
+| **drop-in `grep`/`glob`** | opt-in replacements that keep the built-in call shapes but carry scope evidence |
 
 Rust, TypeScript/JavaScript, Python and Go are indexed; the extension set is configurable.
+
+## Replacing `grep` at the tool level
+
+Set `provideSearchTools: true` and the row registers **drop-in `grep` and `glob`** beside
+`find_symbol`. They keep the same call shapes, so nothing about how an agent works has to
+change — it calls `grep` and gets a better one:
+
+```
+grep "TODO" · 3 match(es) in 3 file(s)
+index crates@…: 88 files (built in 24ms)
+SEARCHED: .rs×88
+coverage: complete — 88 file(s) searched. Every allow-listed file under this root was read,
+          so a "not found" here is final
+crates/kernel/src/lib.rs:47: // TODO: …
+```
+
+What that buys, relative to the built-in:
+
+- **a negative carries its scope**, so it can be believed instead of re-checked by hand;
+- **a path that does not exist is a hard error that read nothing**, naming the nearest existing
+  directory and the closest names in it — never an empty result an agent can read as
+  "not found";
+- **counts are exact even when rows are capped**, and the report says which is which.
+
+Pair it with disabling the row that provides the built-in search tools, because both register
+into the same preset layer and a duplicate name in one layer is an error rather than a shadow:
+
+```yaml
+- id: symbol-index
+  name: dsh-tool-symbol-index
+  config:
+    toolName: find_symbol
+    provideSearchTools: true
+
+# Disabled in favour of the index-backed grep/glob above. Re-enable this row and
+# drop provideSearchTools to revert.
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  disabled: true
+```
+
+### Why a drop-in replacement and not a redirect
+
+`tools/pre-execute` can allow, deny or ask — it **cannot substitute a result** — so
+intercepting a grep and "redirecting" it would cost one round trip per search. Worse, it adds
+doctrine, and the A/B measured where doctrine leads: the only arm to lose correctness was the
+one told how to work, and it lost it by second-guessing an answer that was already right. A
+`grep` that simply returns scoped, exact-count results needs no instruction and cannot be
+second-guessed into being wrong.
+
+`glob` is served from its own path-only walk, not from the index, precisely so that it still
+finds `Cargo.toml`, `Makefile` and fixtures — files the source index deliberately never reads.
+There is a regression test for that.
 
 ## The four deliberate design decisions
 
@@ -149,7 +203,7 @@ Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms,
 
 ## Configuration
 
-Every cap is optional and overridable per row: `toolName`, `guidanceSection`, `roots`,
+Every cap is optional and overridable per row: `toolName`, `provideSearchTools`, `guidanceSection`, `roots`,
 `include`, `excludeDirs`, `maxFiles`, `maxFileBytes`, `maxIndexEntries`, `indexTtlMs`,
 `maxSitesPerSymbol`, `maxTargetNames`, `maxTextSites`, `maxMentionSites`, `maxOutputChars`,
 `timeoutMs`. See `examples/preset-row.yml`.

@@ -5,6 +5,8 @@
   name: dsh-tool-symbol-index
   config:
     toolName: find_symbol
+    # register drop-in `grep`/`glob` too; pair with disabling tool-fs-search
+    provideSearchTools: false
     # every field below is optional; these are the defaults
     guidanceSection: true
     maxFiles: 20000
