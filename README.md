@@ -25,11 +25,52 @@ negative read as an incomplete lookup rather than as an answer. The unit of wast
 call: each grep re-sent the whole context and returned raw matches the model could
 re-litigate.
 
-A controlled A/B on an identical task then showed where the cost really was. `find_symbol`'s
-own output was **9,180 of the arm's 110,484 characters** of tool output. Three *other* calls
+A controlled A/B on an identical task showed where the cost really was. `find_symbol`'s own
+output was **9,180 of the arm's 110,484 characters** of tool output. Three *other* calls
 produced 96,074 (**87%**): a 50,000-char `find | uniq -c` census, a 25,697-char
 `grep 'Focusable for'`, and a 20,377-char mention grep. **Every one of them existed because of
-a gap in the tool, not because of its output format.** This version closes those gaps.
+a gap in the tool, not because of its output format.**
+
+A rerun of the same byte-identical task then measured the fixes (three arms, one model, both
+source trees unchanged):
+
+| metric | A1 grep | B1 `find_symbol` | **A2 grep** | **B2 `find_symbol`** | **C2 unguided** |
+| --- | --- | --- | --- | --- | --- |
+| tool calls | 37 | 19 | 47 | 24 | **18** |
+| steps | 25 | 14 | 40 | 22 | **13** |
+| tokens in (summed) | 237k | 331k | 314k | **146k** | 162k |
+| peak single-step input | 22.0k | 46.8k | 23.6k | **13.8k** | 23.7k |
+| wall clock | 227 s | 246 s | 263 s | **165 s** | 336 s |
+| correctness | ✔ | ✔ | ✔ | ✔ | ✔ |
+
+**v1 → v2 on the tool-directed arm: input tokens −56%, peak context −71%, wall clock −33%** —
+at *more* calls (19→24) and steps (14→22). The win is context cost, not call count, and the
+full 10-symbol / 2-root report is 11,039 chars with no truncation.
+
+### The result that shaped the report format
+
+Every arm was 20/20 correct, so the round turned on the one large trait set (185 names /
+190 sites):
+
+| | A2 grep | B2 `find_symbol` | C2 unguided |
+| --- | --- | --- | --- |
+| `Focusable` targets | 187 — 2 false positives | 184 — 1 missing | **185 — exact** |
+| `FocusOnlyModal` (the v1 defect) | present | absent | present |
+
+The tool's own answer was **complete and correct** — 190 impls, `FocusOnlyModal` enumerated,
+186 entries diffing to the truth with zero extras and zero omissions. B2's miss was
+self-inflicted: it read the report's smaller count beside the larger as *"capped at 186"* and
+rebuilt the set with a grep whose pattern could not match a 4-space-indented
+`impl gpui::Focusable for X`, discarding an answer it already had.
+
+**Both manual corrections in that round made the answer worse than the tool's own answer**, in
+opposite directions, and the best arm was the one given the tool with no doctrine attached.
+Two consequences are built into this plugin:
+
+- the report never presents a count an agent could read as a cap — `impl-sites 12 of 190 shown
+  (detail rows capped)` and `impl-targets 186 unique type(s) from 190 impl site(s) — COMPLETE
+  list, do not re-derive it` are labelled, related, and explicit about which is which;
+- the tool is designed to be *added*, not *doctrined around*.
 
 ## What it does
 
@@ -93,28 +134,6 @@ see `impl Window { … }` — which is nevertheless an impl of `Window`.
 
 Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms, text scan
 ~110 ms.
-
-## Status: known delivery issue on the reference deployment
-
-The plugin code is complete and verified (see below), but on **one** DSH deployment it has not
-yet been observed to reach an agent's tool catalog. The evidence, so nobody repeats it:
-
-- a fresh child agent on a preset containing this row gets the plugin's **prompt section**
-  (order 116) but **not** its tool;
-- the plugin's own diagnostic confirms `ctx.tools.register()` returned normally;
-- a separate control proves the mechanism works: disabling the `tool-bash` **package** row
-  removed `bash` from the same child, so preset rows *do* deliver tools;
-- the failure reproduces identically with the row as a relative file, an absolute path, and a
-  package name; with a minimal hand-rolled probe tool registered from the same `apply()`; with
-  and without `ctx.effect`; with a `~standard` `Config`, a minimal `Config` and no `Config`;
-  with and without a `default` export; and across clean process restarts.
-
-So the shape of the plugin matches the working package rows and the row form is not the
-variable. What is left is the tool-registry layer/view path inside DSH, which needs debugging
-harness-side. **Read the section above as "the plugin is correct", not "it is installed and
-working"** — verify with one child agent asking for `find_symbol` before relying on it. The
-most promising workaround, if you hit this, is to register the tool against the child's own
-scope at composition time rather than from a preset row.
 
 ## Honest limitations
 

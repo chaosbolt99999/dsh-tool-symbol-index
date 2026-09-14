@@ -177,7 +177,7 @@ test('trait impls parse generics, lifetimes, and multiple impls of one trait', a
   assert.ok(forTypes.includes('BenchWindowContext<\'_, \'_>'))
   assert.ok(forTypes.includes('VisualTestContext'))
   assert.ok(forTypes.includes('Wrapper<T>'))
-  assert.match(entry.verdict, /4 impl\(s\) of this trait/)
+  assert.match(entry.verdict, /4 impl site\(s\) across 4 unique target type\(s\)/)
   assert.deepEqual(entry.implTargets, [...entry.implTargets].sort(), 'target names are sorted')
   for (const forType of forTypes) assert.ok(entry.implTargets.includes(forType), forType)
   rmSync(root, { recursive: true, force: true })
@@ -576,7 +576,7 @@ test('counts stay exact when rows are capped', async () => {
   assert.equal(entry.implTargetsTotal, 30, 'the target SET is complete by default, not paginated')
   assert.equal(entry.implTargets.length, 30)
   const text = tool.output.render({}, value)[0].text
-  assert.match(text, /implements this trait \(30\)/)
+  assert.match(text, /impl-targets 30 unique type\(s\) from 30 impl site\(s\)/)
   assert.match(text, /Type29/)
   rmSync(root, { recursive: true, force: true })
 })
@@ -619,5 +619,56 @@ test('mentions: true returns use sites instead of forcing a grep', async () => {
   assert.equal(entry.mentions.scanned, true)
   assert.ok(entry.mentions.count >= 2, 'def + two uses, got ' + entry.mentions.count)
   assert.ok(entry.mentions.sites.length >= 2)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the two impl counts are labelled, related, and never read as a cap', async () => {
+  // The v2 A/B's only correctness regression: an arm read
+  //   implements this trait (186)   ... beside ...   190 impl(s) of this trait
+  // as "the list is capped at 186", then rebuilt the set by grep with a pattern
+  // that could not match a 4-space-indented `impl gpui::Focusable for X`, losing
+  // a target it had already been given. Both counts are legitimate — a generic
+  // type may be implemented at several SITES — so the report must state the
+  // relationship and mark completeness explicitly.
+  const root = fixtureTree({
+    'a.rs': [
+      'pub trait Focusable {}',
+      'impl Focusable for Plain {}',
+      'impl Focusable for Wrapper<T> {}',
+      'impl Focusable for Other {}',
+    ].join('\n'),
+    // The SAME target written at a second site: 4 impl sites, 3 unique types.
+    'b.rs': 'impl Focusable for Plain {}',
+  })
+  const { tool } = await loadTool(MODULE, { maxSitesPerSymbol: 2 })
+  const value = await tool.execute({ symbols: ['Focusable'], path: root }, mockExec(root))
+  const entry = value.symbols[0]
+  assert.equal(entry.implsTotal, 4, 'four impl sites')
+  assert.equal(entry.implTargetsTotal, 3, 'three unique target types')
+  const text = tool.output.render({}, value)[0].text
+
+  // Both numbers present, adjacent to each other, and related.
+  assert.match(text, /impl-sites 2 of 4 shown \(detail rows capped\)/)
+  assert.match(text, /impl-targets 3 unique type\(s\) from 4 impl site\(s\)/)
+  // The target list is complete, and says so; the cap applies only to site rows.
+  assert.match(text, /COMPLETE list, do not re-derive it/)
+  assert.doesNotMatch(text, /impl-targets 3 unique type\(s\) from 4 impl site\(s\) — CAPPED/)
+  // And the verdict carries the same pairing rather than a bare count.
+  assert.match(entry.verdict, /4 impl site\(s\) across 3 unique target type\(s\)/)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a genuinely capped target list says CAPPED instead of COMPLETE', async () => {
+  const lines = []
+  for (let index = 0; index < 8; index += 1) lines.push(`impl VisualContext for Type${index} {}`)
+  const root = fixtureTree({ 'a.rs': 'pub trait VisualContext {}\n' + lines.join('\n') })
+  const { tool } = await loadTool(MODULE, { maxTargetNames: 3 })
+  const value = await tool.execute({ symbols: ['VisualContext'], path: root }, mockExec(root))
+  const text = tool.output.render({}, value)[0].text
+  assert.match(text, /impl-targets 8 unique type\(s\) from 8 impl site\(s\) — CAPPED, only 3 named/)
+  assert.match(text, /\+5 more/)
+  assert.doesNotMatch(text, /COMPLETE list/)
   rmSync(root, { recursive: true, force: true })
 })
