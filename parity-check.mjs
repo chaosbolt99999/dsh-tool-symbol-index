@@ -29,12 +29,33 @@
  * claim is checkable by eye.
  *
  * Usage: node parity-check.mjs [--quick]
+ *
+ * THE TREE AND THE SYMBOL SET ARE BOTH OVERRIDABLE, so this differential is not
+ * welded to one machine's vendored checkout:
+ *
+ *   SYMBOL_INDEX_FIXTURE=<dir>    the tree to search (default: the vendored Zed
+ *                                 checkout below; a missing path stays the
+ *                                 plugin's hard error, which reads nothing)
+ *   SYMBOL_INDEX_SYMBOLS=a,b,c    the symbol set to diff (default: the hostile
+ *                                 Zed set). Needed whenever the tree is not Zed,
+ *                                 because the default names simply do not exist
+ *                                 anywhere else.
+ *
+ * Example, over the committed subtoken fixture:
+ *   SYMBOL_INDEX_FIXTURE=fixtures/subtoken \
+ *   SYMBOL_INDEX_SYMBOLS=HttpFetcher,UserProfile,get_user_by_id,... node parity-check.mjs
  */
 import { execFileSync } from 'node:child_process'
+import { resolve as resolvePath } from 'node:path'
 import { loadTool, mockExec } from './harness.mjs'
 
 const MODULE = new URL('./lib/index.js', import.meta.url).pathname
-const ROOT = '/home/chaosbolt/.cargo/git/checkouts/zed-a70e2ad075855582/87a1ea3'
+/** The vendored Zed checkout this differential was written against. */
+const DEFAULT_ROOT = '/home/chaosbolt/.cargo/git/checkouts/zed-a70e2ad075855582/87a1ea3'
+// Resolved, so a relative SYMBOL_INDEX_FIXTURE works: the tool resolves its root
+// against the session cwd, and a relative root there would resolve against
+// itself. A path that still does not exist stays the plugin's hard error.
+const ROOT = resolvePath(process.env.SYMBOL_INDEX_FIXTURE ?? DEFAULT_ROOT)
 const QUICK = process.argv.includes('--quick')
 
 /**
@@ -50,12 +71,25 @@ const QUICK = process.argv.includes('--quick')
  *   PickerDelegate      an associated-type-heavy trait
  *   NoSuchSymbolXYZ123  absence soundness
  */
-const SYMBOLS = QUICK
+const DEFAULT_SYMBOLS = QUICK
   ? ['Focusable', 'VisualContext', 'FocusOnlyModal', 'NoSuchSymbolXYZ123']
   : [
     'Focusable', 'VisualContext', 'FocusOnlyModal', 'Context', 'Render', 'AppContext',
     'Entity', 'Window', 'TerminalPanel', 'Picker', 'PickerDelegate', 'NoSuchSymbolXYZ123',
   ]
+
+/**
+ * The overridable symbol set. Splitting on `,` and dropping blanks means a shell
+ * list cannot smuggle an empty symbol into the differential, where it would
+ * silently compare nothing against nothing.
+ */
+const SYMBOLS = process.env.SYMBOL_INDEX_SYMBOLS === undefined
+  ? DEFAULT_SYMBOLS
+  : process.env.SYMBOL_INDEX_SYMBOLS.split(',').map(entry => entry.trim()).filter(entry => entry !== '')
+if (SYMBOLS.length === 0) {
+  console.error('SYMBOL_INDEX_SYMBOLS was set but contained no symbol names.')
+  process.exit(1)
+}
 
 /** Run grep over the tree, returning `path:line:text` rows with ./ stripped. */
 function grep(pattern) {
@@ -181,8 +215,10 @@ const { tool } = await loadTool(MODULE, {})
 const report = { pass: 0, fail: 0, failures: [], extras: [] }
 
 console.log('='.repeat(78))
-console.log('GREP-PARITY DIFFERENTIAL over', ROOT)
-console.log('symbols:', SYMBOLS.join(', '))
+console.log('GREP-PARITY DIFFERENTIAL over', ROOT
+  + (ROOT === DEFAULT_ROOT ? ' (default Zed checkout)' : ' (SYMBOL_INDEX_FIXTURE override)'))
+console.log('symbols:', SYMBOLS.join(', ')
+  + (process.env.SYMBOL_INDEX_SYMBOLS === undefined ? ' (default hostile set)' : ' (SYMBOL_INDEX_SYMBOLS override)'))
 console.log('='.repeat(78))
 
 const started = Date.now()

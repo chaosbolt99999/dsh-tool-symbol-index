@@ -11,15 +11,32 @@
  *
  * Compare with the incident: 41 identical bash calls and ~278 steps failed to
  * establish this.
+ *
+ * The tree is overridable through SYMBOL_INDEX_FIXTURE. The ground truth above
+ * was read off the Zed checkout — 2,013 indexed files, an impl at
+ * `async_context.rs:488`, exactly three `VisualContext` impls — so those
+ * assertions are Zed-specific by construction: against any other tree they are
+ * SKIPPED with a notice rather than silently satisfied, and only the
+ * tree-independent invariants are asserted. The differential for a custom tree
+ * is `parity-check.mjs`, whose oracle is computed from grep rather than
+ * transcribed from this checkout.
  */
+import { resolve as resolvePath } from 'node:path'
 import { loadTool, mockExec } from './harness.mjs'
 
 const MODULE = new URL('./lib/index.js', import.meta.url).pathname
-const FIXTURE = '/home/chaosbolt/.cargo/git/checkouts/zed-a70e2ad075855582/87a1ea3'
+/** The vendored Zed checkout this replay's ground truth was read from. */
+const DEFAULT_FIXTURE = '/home/chaosbolt/.cargo/git/checkouts/zed-a70e2ad075855582/87a1ea3'
+// Resolved, so a relative SYMBOL_INDEX_FIXTURE works: the tool resolves its root
+// against the session cwd, and a relative root there would resolve against
+// itself. A path that still does not exist stays the plugin's hard error.
+const FIXTURE = resolvePath(process.env.SYMBOL_INDEX_FIXTURE ?? DEFAULT_FIXTURE)
+const ZED_GROUND_TRUTH = FIXTURE === DEFAULT_FIXTURE
 
 const { tool } = await loadTool(MODULE, {})
 
 console.log('=== call 1: cold index, three symbols in one call ===')
+console.log('fixture:', FIXTURE, ZED_GROUND_TRUTH ? '(default Zed checkout)' : '(SYMBOL_INDEX_FIXTURE override)')
 const coldStart = Date.now()
 const cold = await tool.execute(
   { symbols: ['VisualContext', 'AppContext'], path: FIXTURE, expect: 'Context' },
@@ -48,89 +65,107 @@ console.log('warm wall ms:', warmWall, '· reused index:', warm.index.reused)
 
 // ── assertions ──────────────────────────────────────────────────────────────
 const failures = []
-const visual = cold.symbols.find(s => s.name === 'VisualContext')
-const appContext = cold.symbols.find(s => s.name === 'AppContext')
 
-const definition = visual.definitions.find(d => d.path.endsWith('crates/gpui/src/gpui.rs'))
-if (definition === undefined) failures.push('VisualContext definition not found in gpui.rs')
-else {
-  if (definition.line !== 260) failures.push(`VisualContext definition line ${definition.line} !== 260`)
-  if (definition.kind !== 'trait') failures.push(`VisualContext kind ${definition.kind} !== trait`)
-  if (!definition.text.includes('pub trait VisualContext: AppContext')) {
-    failures.push(`VisualContext signature text unexpected: ${definition.text}`)
-  }
-}
-const forTypes = visual.impls.map(i => i.forType).sort()
-const expectedForTypes = ['AsyncWindowContext', "BenchWindowContext<'_, '_>", 'VisualTestContext'].sort()
-if (JSON.stringify(forTypes) !== JSON.stringify(expectedForTypes)) {
-  failures.push(`impl forTypes ${JSON.stringify(forTypes)} !== ${JSON.stringify(expectedForTypes)}`)
-}
-const expectedImplLines = {
-  AsyncWindowContext: 488,
-  "BenchWindowContext<'_, '_>": 1267,
-  VisualTestContext: 1129,
-}
-for (const impl of visual.impls) {
-  const expected = expectedImplLines[impl.forType]
-  if (expected === undefined) continue
-  if (impl.line !== expected) failures.push(`impl ${impl.forType} line ${impl.line} !== ${expected}`)
-}
-if (!visual.verdict.includes('expect Context: NO')) {
-  failures.push('verdict does not state the explicit expect answer (Context): ' + visual.verdict)
-}
-if (!visual.verdict.includes('3 impl site(s) across 3 unique target type(s)')) {
-  failures.push('verdict does not report exactly three VisualContext impls: ' + visual.verdict)
-}
-if (!visual.verdict.includes('NOT an impl target')) {
-  failures.push('expect clause is not explicit about absence: ' + visual.verdict)
-}
-if (appContext.status !== 'defined') failures.push('AppContext should be DEFINED, got ' + appContext.status)
-if (cold.index.files !== 2013) failures.push(`files indexed ${cold.index.files} !== 2013 (1956 .rs + 57 .py/.js)`)
+// Invariants that hold for ANY tree, asserted in both modes. An empty render is
+// never a success: it is the failure this whole plugin exists to prevent.
+if (coldText.length === 0) failures.push('cold call rendered no text at all')
+if (warmText.length === 0) failures.push('warm call rendered no text at all')
 if (coldText.length > 14000) failures.push(`rendered ${coldText.length} chars exceeds maxOutputChars`)
 if (warm.index.reused !== true) failures.push('warm call did not reuse the index')
 if (warm.index.id !== cold.index.id) failures.push('warm call rebuilt the index')
 
-// ── v2: the A/B's measured defect, against the same tree and the same oracle ──
-// `grep -rnE --include='*.rs' 'impl[^;{]*\bFocusable\b\s+for\b'` returns 190 rows
-// and 186 distinct targets on this checkout. v1 reported 189 and dropped
-// `FocusOnlyModal` (crates/terminal_view/src/terminal_panel.rs:2494, a
-// qualified-path impl inside a test module). Asserted here so it cannot regress.
-console.log('')
-console.log('=== v2 regression: the A/B impl-enumeration gap ===')
-const gap = await tool.execute({ symbols: ['Focusable', 'FocusOnlyModal'], path: FIXTURE }, mockExec(FIXTURE))
-const focusable = gap.symbols.find(s => s.name === 'Focusable')
-const focusOnly = gap.symbols.find(s => s.name === 'FocusOnlyModal')
-console.log('Focusable   impls:', focusable.implsTotal, '· distinct targets:', focusable.implTargetsTotal)
-console.log('FocusOnlyModal implements:', focusOnly.implsForTotal, '->', focusOnly.implForTargets.join(', '))
-console.log('macro impl templates disclosed:', gap.index.templates, '·', gap.index.templateSamples[0])
-if (focusable.implsTotal !== 190) {
-  failures.push(`Focusable impl rows ${focusable.implsTotal} !== 190 (grep oracle)`)
-}
-if (focusable.implTargetsTotal !== 186) {
-  failures.push(`Focusable distinct targets ${focusable.implTargetsTotal} !== 186 (grep oracle)`)
-}
-if (!focusable.implTargets.includes('FocusOnlyModal')) {
-  failures.push('Focusable impl targets omit FocusOnlyModal — the qualified-path impl is dropped again')
-}
-if (focusOnly.implsForTotal !== 4) {
-  failures.push(`FocusOnlyModal implements ${focusOnly.implsForTotal} traits; grep 'for FocusOnlyModal' says 4`)
-}
-if (!focusOnly.implForTargets.includes('gpui::Focusable')) {
-  failures.push('FocusOnlyModal does not list gpui::Focusable among what it implements')
-}
-// The `quote!` templates in crates/gpui_macros must be DISCLOSED, not attributed:
-// folding one in adds the bogus target `#type_name #type_generics #where_clause`.
-if (gap.index.templates < 1) {
-  failures.push('no macro impl template was detected; the quote! bodies should have been skipped')
-}
-if (focusable.implTargets.some(target => target.includes('#'))) {
-  failures.push('a macro metavariable leaked into the impl target set')
+if (ZED_GROUND_TRUTH) {
+  const visual = cold.symbols.find(s => s.name === 'VisualContext')
+  const appContext = cold.symbols.find(s => s.name === 'AppContext')
+
+  const definition = visual.definitions.find(d => d.path.endsWith('crates/gpui/src/gpui.rs'))
+  if (definition === undefined) failures.push('VisualContext definition not found in gpui.rs')
+  else {
+    if (definition.line !== 260) failures.push(`VisualContext definition line ${definition.line} !== 260`)
+    if (definition.kind !== 'trait') failures.push(`VisualContext kind ${definition.kind} !== trait`)
+    if (!definition.text.includes('pub trait VisualContext: AppContext')) {
+      failures.push(`VisualContext signature text unexpected: ${definition.text}`)
+    }
+  }
+  const forTypes = visual.impls.map(i => i.forType).sort()
+  const expectedForTypes = ['AsyncWindowContext', "BenchWindowContext<'_, '_>", 'VisualTestContext'].sort()
+  if (JSON.stringify(forTypes) !== JSON.stringify(expectedForTypes)) {
+    failures.push(`impl forTypes ${JSON.stringify(forTypes)} !== ${JSON.stringify(expectedForTypes)}`)
+  }
+  const expectedImplLines = {
+    AsyncWindowContext: 488,
+    "BenchWindowContext<'_, '_>": 1267,
+    VisualTestContext: 1129,
+  }
+  for (const impl of visual.impls) {
+    const expected = expectedImplLines[impl.forType]
+    if (expected === undefined) continue
+    if (impl.line !== expected) failures.push(`impl ${impl.forType} line ${impl.line} !== ${expected}`)
+  }
+  if (!visual.verdict.includes('expect Context: NO')) {
+    failures.push('verdict does not state the explicit expect answer (Context): ' + visual.verdict)
+  }
+  if (!visual.verdict.includes('3 impl site(s) across 3 unique target type(s)')) {
+    failures.push('verdict does not report exactly three VisualContext impls: ' + visual.verdict)
+  }
+  if (!visual.verdict.includes('NOT an impl target')) {
+    failures.push('expect clause is not explicit about absence: ' + visual.verdict)
+  }
+  if (appContext.status !== 'defined') failures.push('AppContext should be DEFINED, got ' + appContext.status)
+  if (cold.index.files !== 2013) failures.push(`files indexed ${cold.index.files} !== 2013 (1956 .rs + 57 .py/.js)`)
+
+  // ── v2: the A/B's measured defect, against the same tree and the same oracle ──
+  // `grep -rnE --include='*.rs' 'impl[^;{]*\bFocusable\b\s+for\b'` returns 190 rows
+  // and 186 distinct targets on this checkout. v1 reported 189 and dropped
+  // `FocusOnlyModal` (crates/terminal_view/src/terminal_panel.rs:2494, a
+  // qualified-path impl inside a test module). Asserted here so it cannot regress.
+  console.log('')
+  console.log('=== v2 regression: the A/B impl-enumeration gap ===')
+  const gap = await tool.execute({ symbols: ['Focusable', 'FocusOnlyModal'], path: FIXTURE }, mockExec(FIXTURE))
+  const focusable = gap.symbols.find(s => s.name === 'Focusable')
+  const focusOnly = gap.symbols.find(s => s.name === 'FocusOnlyModal')
+  console.log('Focusable   impls:', focusable.implsTotal, '· distinct targets:', focusable.implTargetsTotal)
+  console.log('FocusOnlyModal implements:', focusOnly.implsForTotal, '->', focusOnly.implForTargets.join(', '))
+  console.log('macro impl templates disclosed:', gap.index.templates, '·', gap.index.templateSamples[0])
+  if (focusable.implsTotal !== 190) {
+    failures.push(`Focusable impl rows ${focusable.implsTotal} !== 190 (grep oracle)`)
+  }
+  if (focusable.implTargetsTotal !== 186) {
+    failures.push(`Focusable distinct targets ${focusable.implTargetsTotal} !== 186 (grep oracle)`)
+  }
+  if (!focusable.implTargets.includes('FocusOnlyModal')) {
+    failures.push('Focusable impl targets omit FocusOnlyModal — the qualified-path impl is dropped again')
+  }
+  if (focusOnly.implsForTotal !== 4) {
+    failures.push(`FocusOnlyModal implements ${focusOnly.implsForTotal} traits; grep 'for FocusOnlyModal' says 4`)
+  }
+  if (!focusOnly.implForTargets.includes('gpui::Focusable')) {
+    failures.push('FocusOnlyModal does not list gpui::Focusable among what it implements')
+  }
+  // The `quote!` templates in crates/gpui_macros must be DISCLOSED, not attributed:
+  // folding one in adds the bogus target `#type_name #type_generics #where_clause`.
+  if (gap.index.templates < 1) {
+    failures.push('no macro impl template was detected; the quote! bodies should have been skipped')
+  }
+  if (focusable.implTargets.some(target => target.includes('#'))) {
+    failures.push('a macro metavariable leaked into the impl target set')
+  }
+} else {
+  console.log('')
+  console.log('=== assertions (portable subset) ===')
+  console.log('SKIPPED: the Zed ground-truth assertions (2,013 files, gpui.rs:260, the 190/186')
+  console.log('         Focusable counts) describe the default checkout, and SYMBOL_INDEX_FIXTURE')
+  console.log('         points at ' + FIXTURE + '. They are NOT satisfied here — they were not run.')
+  console.log('         The oracle-computed differential is parity-check.mjs:')
+  console.log('           SYMBOL_INDEX_FIXTURE=' + FIXTURE + ' SYMBOL_INDEX_SYMBOLS=... node parity-check.mjs')
 }
 
 console.log('')
 console.log('=== assertions ===')
 if (failures.length === 0) {
-  console.log('ALL GROUND-TRUTH ASSERTIONS PASSED')
+  console.log(ZED_GROUND_TRUTH
+    ? 'ALL GROUND-TRUTH ASSERTIONS PASSED'
+    : 'ALL PORTABLE ASSERTIONS PASSED (Zed ground truth skipped, see above)')
 } else {
   for (const failure of failures) console.log('FAIL:', failure)
   process.exitCode = 1

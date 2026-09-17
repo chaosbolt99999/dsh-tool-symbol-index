@@ -210,6 +210,15 @@ Three properties are checked: **completeness** (everything grep finds, the tool 
 parity**. Inherent impls are reported additively, because grep's `for NAME` pattern cannot
 see `impl Window { … }` — which is nevertheless an impl of `Window`.
 
+Both the tree and the symbol set are overridable, so the differential is not welded to one
+machine's vendored checkout: `SYMBOL_INDEX_FIXTURE=<dir>` and `SYMBOL_INDEX_SYMBOLS=a,b,c`.
+A missing path stays the plugin's hard error that reads nothing — pointing the harness at a
+tree that does not exist fails loudly rather than comparing nothing against nothing.
+`fixtures/subtoken/` is the committed tree that exercises naming-convention equivalence;
+`fixture-replay.mjs` transcribes ground truth from one specific checkout, so against an
+overridden fixture it runs only its tree-independent assertions and prints that the rest were
+skipped rather than letting them pass silently.
+
 Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms, text scan
 ~110 ms.
 
