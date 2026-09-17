@@ -190,6 +190,26 @@ zero ingested files, from a capped index, or with unreadable files is `inconclus
 `absent`. A disclosed policy omission (a pruned `target/`) stays a final `absent`, because the
 caller can see it and override it with `includeExcluded: true`.
 
+### A bad symbol names its closest candidates
+
+Decision #4 already ranked candidates for a bad **path**: a missing directory yields the nearest
+existing ancestor and the closest names inside it, never a bare "cannot resolve". It did not do
+that for a bad **symbol** — an unresolvable name produced a bare `absent` and nothing else, which
+is exactly what starts an agent guessing spellings. An `absent` verdict now names the closest
+names the index actually saw, ranked by bounded case-folded edit distance over the stored
+definition and impl names:
+
+```
+verdict [absent]: ABSENT — no definition, no impl, and no textual mention of "VisualContxt" …
+near-miss 1 of 1 name(s) within edit distance 3 of "VisualContxt" (candidates from the index,
+advisory — the verdict above is unchanged): VisualContext
+```
+
+The candidates come from the index alone — no extra file read, no new walk, no new pass — the
+list is capped and labelled like every other list (shown-of-total, then the remainder), and no
+candidate list can turn an `absent` into anything else. On the Zed checkout, twelve absent
+symbols cost 342 ms warm, alongside the mention scan that was already there.
+
 ### The index says how old it is
 
 The pool serves a build for `indexTtlMs` (10 minutes by default), so for that window an answer

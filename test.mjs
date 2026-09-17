@@ -844,3 +844,69 @@ test('the replacement grep carries the same index-age disclosure', async () => {
   }
   rmSync(root, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// v2.1: near-miss candidates on an absent verdict.
+// ---------------------------------------------------------------------------
+
+evictIndexes()
+test('an absent symbol names its closest indexed candidates and stays absent', async () => {
+  // A bare `absent` is what incites an agent to start guessing spellings —
+  // exactly the name-enumeration waste this tool exists to remove. The bad-PATH
+  // ranker already names the closest entries; a bad SYMBOL now does too.
+  const root = fixtureTree({
+    'lib.rs': [
+      'pub fn get_user_by_id(id: u64) {}',
+      'pub fn process_payment(amount: u64) {}',
+      'pub fn renderReport() {}',
+    ].join('\n'),
+  })
+  const { tool } = await loadTool(MODULE, {})
+  const value = await tool.execute({ symbols: ['process_paymnet'], path: root }, mockExec(root))
+  const entry = value.symbols[0]
+  // A plausible transposition, NOT a convention difference (that is a
+  // different, stricter tier — see the subtoken tests).
+  assert.equal(entry.status, 'absent', 'a candidate list never changes the verdict')
+  assert.equal(entry.definitions.length, 0)
+  assert.equal(entry.nearMissDistance, 3)
+  assert.ok(entry.nearMiss.includes('process_payment'), entry.nearMiss.join(', '))
+  assert.ok(!entry.nearMiss.includes('get_user_by_id'), 'unrelated names are not candidates')
+
+  const text = tool.output.render({}, value)[0].text
+  assert.match(text, /verdict \[absent\]/)
+  assert.match(text, /near-miss \d+ of \d+ name\(s\) within edit distance 3 of "process_paymnet"/)
+  assert.match(text, /advisory — the verdict above is unchanged/)
+  assert.match(text, /process_payment/)
+  assert.deepEqual(validateSubset(tool.output.schema, value), [])
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a name with nothing close enough gets no near-miss list at all', async () => {
+  const root = fixtureTree({ 'lib.rs': 'pub fn get_user_by_id(id: u64) {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+  const value = await tool.execute({ symbols: ['ZzzQqqWwwEee'], path: root }, mockExec(root))
+  assert.equal(value.symbols[0].status, 'absent')
+  assert.deepEqual(value.symbols[0].nearMiss, [])
+  assert.equal(value.symbols[0].nearMissTotal, 0)
+  assert.doesNotMatch(tool.output.render({}, value)[0].text, /near-miss/)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the near-miss list is capped and says how many candidates it is not showing', async () => {
+  const files = {}
+  for (let index = 0; index < 8; index += 1) files[`f${index}.rs`] = `pub fn worker_task_${index}() {}\n`
+  const root = fixtureTree(files)
+  const { tool } = await loadTool(MODULE, {})
+  const value = await tool.execute({ symbols: ['worker_task_x'], path: root }, mockExec(root))
+  const entry = value.symbols[0]
+  assert.equal(entry.status, 'absent')
+  assert.equal(entry.nearMissTotal, 8, 'all eight same-shaped names qualify')
+  assert.equal(entry.nearMiss.length, 5, 'the list is capped')
+  const text = tool.output.render({}, value)[0].text
+  // Capped-list idiom: shown-of-total, then the remainder named as a remainder.
+  assert.match(text, /near-miss 5 of 8 name\(s\) within edit distance 3 of "worker_task_x"/)
+  assert.match(text, /… \+3 more/)
+  rmSync(root, { recursive: true, force: true })
+})
