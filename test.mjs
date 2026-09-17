@@ -910,3 +910,139 @@ test('the near-miss list is capped and says how many candidates it is not showin
   assert.match(text, /… \+3 more/)
   rmSync(root, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// v2.1: subtoken normalisation (naming-convention equivalence).
+// ---------------------------------------------------------------------------
+
+evictIndexes()
+test('a camelCase query resolves a snake_case symbol, disclosed as subtoken-normalized', async () => {
+  // The boundaries where a name is spelled differently on each side: serde
+  // `rename_all`, JSON keys, `invoke("get_user_by_id")`, generated bindings,
+  // TS↔Rust FFI, CLI flags. Rust alone is snake_case end to end.
+  const root = fixtureTree({
+    'lib.rs': [
+      'pub fn get_user_by_id(id: u64) {}',
+      'pub struct UserProfile {}',
+      'pub const MAX_RETRY_COUNT: u32 = 3;',
+    ].join('\n'),
+  })
+  const { tool } = await loadTool(MODULE, {})
+  const value = await tool.execute({
+    symbols: ['getUserById', 'user_profile', 'maxRetryCount', 'get-user-by-id'],
+    path: root,
+  }, mockExec(root))
+  const byName = Object.fromEntries(value.symbols.map(symbol => [symbol.name, symbol]))
+  const pairs = [
+    ['getUserById', 'get_user_by_id'],
+    ['user_profile', 'UserProfile'],
+    ['maxRetryCount', 'MAX_RETRY_COUNT'],
+    ['get-user-by-id', 'get_user_by_id'],
+  ]
+  for (const [query, target] of pairs) {
+    const entry = byName[query]
+    assert.equal(entry.status, 'defined', query)
+    assert.equal(entry.matchedName, target, query)
+    assert.equal(entry.matchedOn, 'subtoken-normalized', query)
+    assert.equal(entry.definitions[0].path.endsWith('lib.rs'), true)
+  }
+  const text = tool.output.render({}, value)[0].text
+  assert.match(text, /## getUserById \(matched as get_user_by_id\)/)
+  assert.match(text, /naming-convention normalisation to "get_user_by_id"/)
+  assert.deepEqual(validateSubset(tool.output.schema, value), [])
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the stricter tiers win and subtoken resolution only ever runs last', async () => {
+  const root = fixtureTree({ 'lib.rs': 'pub struct UserProfile {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+
+  const exact = await tool.execute({ symbols: ['UserProfile'], path: root }, mockExec(root))
+  assert.equal(exact.symbols[0].matchedOn, 'exact')
+
+  // A stricter tier's hit is never overridden by the looser one: the
+  // case-insensitive tier resolves this before subtoken is ever consulted.
+  const insensitive = await tool.execute({ symbols: ['userprofile'], path: root }, mockExec(root))
+  assert.equal(insensitive.symbols[0].matchedOn, 'case-insensitive')
+  assert.equal(insensitive.symbols[0].matchedName, 'UserProfile')
+
+  // Only a spelling NO stricter tier can reach lands on the subtoken tier.
+  const normalized = await tool.execute({ symbols: ['user_profile'], path: root }, mockExec(root))
+  assert.equal(normalized.symbols[0].matchedOn, 'subtoken-normalized')
+  assert.equal(normalized.symbols[0].matchedName, 'UserProfile')
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('subtoken resolution never collapses adjacent distinct names', async () => {
+  // A splitter that dropped a trailing `s`, or joined tokens without a
+  // separator, would silently merge these. Both are defined exactly, so an
+  // exact-tier hit is available either way — the subtoken keys themselves are
+  // what must stay distinct.
+  const root = fixtureTree({
+    'lib.rs': [
+      'pub fn get_user_id() {}',
+      'pub fn get_user_ids() {}',
+      'pub fn list_user_profile() {}',
+      'pub fn list_user_profiles() {}',
+    ].join('\n'),
+  })
+  const { tool } = await loadTool(MODULE, {})
+  const value = await tool.execute({
+    symbols: ['getUserId', 'getUserIds', 'listUserProfile', 'listUserProfiles'],
+    path: root,
+  }, mockExec(root))
+  assert.deepEqual(
+    Object.fromEntries(value.symbols.map(symbol => [symbol.name, symbol.matchedName])),
+    {
+      getUserId: 'get_user_id',
+      getUserIds: 'get_user_ids',
+      listUserProfile: 'list_user_profile',
+      listUserProfiles: 'list_user_profiles',
+    },
+  )
+  for (const symbol of value.symbols) {
+    assert.equal(symbol.matchedOn, 'subtoken-normalized', symbol.name)
+  }
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('subtoken resolution invents no symbol that is not in the index', async () => {
+  const root = fixtureTree({ 'lib.rs': 'pub fn get_user_id() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+  // Same tokens but with a plural token is a DIFFERENT identifier, and a
+  // genuinely unknown name stays absent — the tier widens spelling, not names.
+  const value = await tool.execute({ symbols: ['get_user_ids', 'userprofilex'], path: root }, mockExec(root))
+  assert.deepEqual(value.symbols.map(symbol => symbol.status), ['absent', 'absent'])
+  assert.deepEqual(value.symbols.map(symbol => symbol.nearMiss.length > 0), [true, false])
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a subtoken hit resolves definitions without inflating the impl target set', async () => {
+  // The `expect` gate compares against `implTargets`, so a looser tier feeding
+  // the impl sets could turn "does X implement Y" into a YES with no evidence.
+  // Subtoken resolution therefore resolves DEFINITIONS ONLY: the same symbol
+  // reached by a different spelling reports the definitions and no impls. That
+  // under-report is the safe direction and is disclosed by `matchedOn`.
+  const root = fixtureTree({
+    'lib.rs': [
+      'pub trait HttpFetcher {}',
+      'impl HttpFetcher for UserProfile {}',
+    ].join('\n'),
+  })
+  const { tool } = await loadTool(MODULE, {})
+  const exact = await tool.execute({ symbols: ['HttpFetcher'], path: root }, mockExec(root))
+  assert.equal(exact.symbols[0].implsTotal, 1)
+
+  const normalized = await tool.execute({ symbols: ['http_fetcher'], path: root }, mockExec(root))
+  assert.equal(normalized.symbols[0].matchedName, 'HttpFetcher')
+  assert.equal(normalized.symbols[0].matchedOn, 'subtoken-normalized')
+  assert.equal(normalized.symbols[0].status, 'defined')
+  assert.equal(normalized.symbols[0].definitions.length, 1)
+  assert.equal(normalized.symbols[0].implsTotal, 0)
+  assert.equal(normalized.symbols[0].implTargetsTotal, 0)
+  rmSync(root, { recursive: true, force: true })
+})

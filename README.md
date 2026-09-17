@@ -175,8 +175,9 @@ trait X". Storing the trait *and* the self type costs one row and answers both d
 
 **2. A qualified name is stored under both forms and says which matched.** Keeping only the
 last segment is false-negative-free but false-positive-prone; keeping only the full path is
-the reverse. `matchedOn: exact | path-segment-or-generic | case-insensitive` discloses which
-form resolved, instead of silently presenting a last-segment hit as an exact one.
+the reverse. `matchedOn: exact | path-segment-or-generic | case-insensitive |
+subtoken-normalized` discloses which form resolved, instead of silently presenting a
+last-segment or convention-normalised hit as an exact one.
 
 **3. A negative must name its scope.** The mechanism that stops an agent re-searching is not
 the phrase "no results" but the *presence of scope evidence*. Every report carries
@@ -189,6 +190,41 @@ the nearest existing directory and its closest names — never an empty result. 
 zero ingested files, from a capped index, or with unreadable files is `inconclusive`, never
 `absent`. A disclosed policy omission (a pruned `target/`) stays a final `absent`, because the
 caller can see it and override it with `includeExcluded: true`.
+
+### Naming-convention equivalence, as the last tier
+
+Rust is snake_case end to end, so inside a pure Rust tree a convention mismatch never shows up.
+It shows up at every boundary — serde `rename_all`, JSON keys, `invoke("get_user_by_id")` string
+literals, generated bindings, TS↔Rust FFI, CLI flags — where the caller writes a symbol in the
+spelling its binding uses. `get_user_by_id` and `getUserById` used to be different keys.
+
+A deterministic splitter (camelCase boundaries, `snake_case`, `kebab-case`, `SCREAMING_SNAKE`,
+alpha/digit transitions, case-folded, empties dropped) now keys an additional definition map, and
+the query is normalised with the **same** function. The tier runs **last**: exact →
+path-segment-or-generic → case-insensitive → subtoken-normalized, and a stricter tier's hit is
+never overridden by a looser one.
+
+```
+## getUserById (matched as get_user_by_id)
+def fn lib.rs:8  pub fn get_user_by_id(id: u64) -> UserProfile {
+verdict [defined]: DEFINED lib.rs:8 (fn); no definition of "getUserById" as written; resolved by
+naming-convention normalisation to "get_user_by_id" (different spelling, same identifier
+tokens — no exact, path-segment or case-insensitive form matched).
+```
+
+Two deliberate consequences, both on the safe side:
+
+- **Subtoken resolution resolves definitions only.** The impl maps are not subtoken-keyed, so a
+  looser tier can never inflate `implTargets` — which is exactly the set the `expect` gate
+  compares against, and therefore the set that could turn "does X implement Y" into a YES with
+  no evidence. A symbol reached by a different spelling reports its definitions and no impls;
+  `matchedOn` says why.
+- **One token apart does not collapse.** `list_user_profile`/`list_user_profiles` and
+  `list_user_id`/`list_user_ids` resolve to different symbols, because keys are token lists
+  joined by a separator that cannot occur inside a token.
+
+This widens what a name query can hit, so it is measured rather than assumed — see the subtoken
+oracle below.
 
 ### A bad symbol names its closest candidates
 
@@ -249,6 +285,29 @@ Three properties are checked: **completeness** (everything grep finds, the tool 
 parity**. Inherent impls are reported additively, because grep's `for NAME` pattern cannot
 see `impl Window { … }` — which is nevertheless an impl of `Window`.
 
+### The subtoken oracle
+
+Subtoken resolution widens what a name query hits, and the property a widening can hurt is
+soundness. It is therefore re-measured, not assumed. `parity-check.mjs` runs a second, always-on
+oracle over `fixtures/subtoken/` — the committed convention tree — where every case is checked
+against grep:
+
+```
+PASS  getUserById          -> get_user_by_id       subtoken-normalized  ·  grep-word-hits=0
+PASS  listUserProfile      -> list_user_profile    subtoken-normalized  ·  grep-word-hits=0
+PASS  listUserProfiles     -> list_user_profiles   subtoken-normalized  ·  grep-word-hits=0
+PASS  http_fetcher         -> HttpFetcher          subtoken-normalized  ·  grep-word-hits=0
+PASS  get_user_ids         -> null                 exact                ·  grep-word-hits=0
+SUBTOKEN ORACLE RESULT: 20 pass, 0 fail  (20 cases)
+```
+
+A resolved convention pair must have **zero** grep definition rows under its own spelling — so
+the tier was genuinely needed — and zero word hits besides. A name that is not token-equivalent
+to anything must stay `absent` and grep must agree. Names one token apart must resolve to
+different symbols, asserted against each other. And the same symbol reached both ways must not
+move the impl-target set. Run against the previous revision the oracle reports 10 failures, so
+it gates the change rather than describing it.
+
 Both the tree and the symbol set are overridable, so the differential is not welded to one
 machine's vendored checkout: `SYMBOL_INDEX_FIXTURE=<dir>` and `SYMBOL_INDEX_SYMBOLS=a,b,c`.
 A missing path stays the plugin's hard error that reads nothing — pointing the harness at a
@@ -271,6 +330,9 @@ Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms,
   missed.
 - **No semantic resolution.** A name shared by several modules resolves to all of them; the
   report does not claim which one a use refers to.
+- **Subtoken hits under-report impls.** A symbol reached through the convention tier reports its
+  definitions and no impl sites, because widening the impl set is what could corrupt the `expect`
+  gate. Ask with the spelling that is actually defined to see the impls.
 - Impls for concrete types produced by a derive macro are not visible to a syntactic indexer.
 
 ## Configuration

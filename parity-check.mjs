@@ -91,11 +91,11 @@ if (SYMBOLS.length === 0) {
   process.exit(1)
 }
 
-/** Run grep over the tree, returning `path:line:text` rows with ./ stripped. */
-function grep(pattern) {
+/** Run grep in a tree, returning `path:line:text` rows with ./ stripped. */
+function grepIn(tree, pattern) {
   try {
     const out = execFileSync('grep', ['-rnE', '--include=*.rs', pattern, '.'], {
-      cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      cwd: tree, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     })
     return out.split('\n').filter(Boolean).map(line => line.replace(/^\.\//, ''))
   } catch (error) {
@@ -103,6 +103,11 @@ function grep(pattern) {
     if (error.status === 1) return []
     throw error
   }
+}
+
+/** Run grep over the differential tree. */
+function grep(pattern) {
+  return grepIn(ROOT, pattern)
 }
 
 /** `path:line` of a grep row. */
@@ -322,5 +327,189 @@ if (report.extras.length > 0) {
 if (report.fail > 0) {
   console.log('FAILURES:')
   for (const failure of report.failures) console.log('  ' + failure)
+  process.exitCode = 1
+}
+
+// ---------------------------------------------------------------------------
+// SUBTOKEN ORACLE.
+//
+// Subtoken resolution lets a name query reach a symbol it could not reach
+// before — `getUserById` now resolves `get_user_by_id`. That WIDENS what a query
+// hits, and the property a widening can hurt is SOUNDNESS: "a symbol the tool
+// calls `absent` has zero occurrences" is the property whose violation makes an
+// agent delete working code. It is therefore re-measured on a tree built for it,
+// never assumed:
+//
+//   * a convention pair the tool resolves must have ZERO word-boundary
+//     occurrences under its own spelling (grep oracle) — so the tier was
+//     genuinely needed and the hit is a widening, not something already there;
+//   * a name that is not token-equivalent to anything stays `absent`, and grep
+//     agrees it has no occurrence;
+//   * names that differ by one token resolve to DIFFERENT symbols;
+//   * a subtoken hit does not move the impl-target set, because `expectAnswer`
+//     compares against exactly that set.
+//
+// The tree is the committed `fixtures/subtoken`, so this section runs wherever
+// the harness is checked out — including when SYMBOL_INDEX_FIXTURE points
+// somewhere else entirely.
+// ---------------------------------------------------------------------------
+const SUBTOKEN_FIXTURE = new URL('./fixtures/subtoken', import.meta.url).pathname
+
+/** query, the name it must resolve to (null for a true negative), and how. */
+const SUBTOKEN_CASES = [
+  // Stricter tiers still win, and say which tier resolved.
+  { query: 'UserProfile', resolvesTo: 'UserProfile', matchedOn: 'exact' },
+  { query: 'get_user_by_id', resolvesTo: 'get_user_by_id', matchedOn: 'exact' },
+  { query: 'userprofile', resolvesTo: 'UserProfile', matchedOn: 'case-insensitive' },
+  // The convention pairs: a spelling a boundary would hand the caller.
+  { query: 'getUserById', resolvesTo: 'get_user_by_id', matchedOn: 'subtoken-normalized' },
+  { query: 'get-user-by-id', resolvesTo: 'get_user_by_id', matchedOn: 'subtoken-normalized' },
+  { query: 'user_profile', resolvesTo: 'UserProfile', matchedOn: 'subtoken-normalized' },
+  { query: 'maxRetryCount', resolvesTo: 'MAX_RETRY_COUNT', matchedOn: 'subtoken-normalized' },
+  { query: 'defaultTimeoutMs', resolvesTo: 'DEFAULT_TIMEOUT_MS', matchedOn: 'subtoken-normalized' },
+  { query: 'listUserProfiles', resolvesTo: 'list_user_profiles', matchedOn: 'subtoken-normalized' },
+  // One token apart: must NOT collapse into the other.
+  { query: 'list_user_profile', resolvesTo: 'list_user_profile', matchedOn: 'exact' },
+  { query: 'list_user_profiles', resolvesTo: 'list_user_profiles', matchedOn: 'exact' },
+  { query: 'listUserProfile', resolvesTo: 'list_user_profile', matchedOn: 'subtoken-normalized' },
+  { query: 'list_user_id', resolvesTo: 'list_user_id', matchedOn: 'exact' },
+  { query: 'list_user_ids', resolvesTo: 'list_user_ids', matchedOn: 'exact' },
+  { query: 'listUserId', resolvesTo: 'list_user_id', matchedOn: 'subtoken-normalized' },
+  { query: 'listUserIds', resolvesTo: 'list_user_ids', matchedOn: 'subtoken-normalized' },
+  // The same symbol reached both ways — the impl set must not move.
+  { query: 'HttpFetcher', resolvesTo: 'HttpFetcher', matchedOn: 'exact', implSites: 1 },
+  { query: 'http_fetcher', resolvesTo: 'HttpFetcher', matchedOn: 'subtoken-normalized', implSites: 0 },
+  // Soundness: absent stays absent, and must be absent under grep too.
+  { query: 'NoSuchSymbolXYZ123', resolvesTo: null, matchedOn: 'exact', status: 'absent' },
+  { query: 'get_user_ids', resolvesTo: null, matchedOn: 'exact', status: 'absent' },
+]
+
+console.log('')
+console.log('='.repeat(78))
+console.log('SUBTOKEN ORACLE over', SUBTOKEN_FIXTURE)
+console.log('='.repeat(78))
+
+const oracle = { pass: 0, fail: 0, failures: [] }
+// The tool caps a call at 12 symbols on purpose, so the oracle respects the
+// contract rather than working around it: batches of twelve, merged. A batch
+// also cannot hold two names that differ only by case — the tool folds those
+// into one entry, which is correct — so `UserProfile` and `userprofile` land in
+// different batches.
+const entriesByQuery = new Map()
+const batches = []
+for (const item of SUBTOKEN_CASES) {
+  const key = item.query.toLowerCase()
+  let batch = batches[batches.length - 1]
+  if (batch === undefined || batch.length >= 12
+    || batch.some(entry => entry.query.toLowerCase() === key)) {
+    batch = []
+    batches.push(batch)
+  }
+  batch.push(item)
+}
+for (const batch of batches) {
+  const batchValue = await tool.execute(
+    { symbols: batch.map(item => item.query), path: SUBTOKEN_FIXTURE, maxSites: 2000 },
+    mockExec(SUBTOKEN_FIXTURE),
+  )
+  for (const entry of batchValue.symbols) entriesByQuery.set(entry.name, entry)
+}
+const oracleEntry = (name) => entriesByQuery.get(name)
+/**
+ * Word-boundary occurrences under grep, and DEFINITION rows under grep. The
+ * distinction matters: the resolution tiers match DEFINITIONS, so the property
+ * that says "no stricter tier could have resolved this" is about definition
+ * rows, while zero word hits is the stronger statement that the guessed
+ * spelling is not in the tree at all.
+ */
+const wordHits = new Map(SUBTOKEN_CASES.map(item =>
+  [item.query, grepIn(SUBTOKEN_FIXTURE, `\\b${item.query}\\b`).length]))
+const definitionRows = new Map(SUBTOKEN_CASES.map(item =>
+  [item.query, grepIn(SUBTOKEN_FIXTURE, definitionPattern(item.query)).length]))
+
+for (const item of SUBTOKEN_CASES) {
+  const entry = oracleEntry(item.query)
+  const problems = []
+  if (entry === undefined) {
+    problems.push('the tool did not report this symbol at all')
+  } else if (item.resolvesTo === null) {
+    if (entry.status !== item.status) {
+      problems.push(`status ${entry.status} !== ${item.status} — a widening invented a symbol`)
+    }
+    if (wordHits.get(item.query) !== 0) {
+      problems.push(`reported absent but grep finds ${wordHits.get(item.query)} word occurrence(s)`)
+    }
+  } else {
+    if (entry.matchedName !== item.resolvesTo) {
+      problems.push(`matchedName ${entry.matchedName} !== ${item.resolvesTo}`)
+    }
+    if (entry.matchedOn !== item.matchedOn) {
+      problems.push(`matchedOn ${entry.matchedOn} !== ${item.matchedOn}`)
+    }
+    if (entry.status !== 'defined') problems.push(`status ${entry.status} !== defined`)
+    if (entry.definitionsTotal === 0) problems.push('resolved but reports no definition site')
+    // The widening is real: no stricter DEFINITION tier could have matched, so
+    // the subtoken tier was genuinely needed. Zero word hits is stronger still —
+    // the guessed spelling is not in the tree at all.
+    if (item.matchedOn === 'subtoken-normalized') {
+      if (definitionRows.get(item.query) !== 0) {
+        problems.push(`subtoken hit while grep sees ${definitionRows.get(item.query)} definition`
+          + ' row(s) — a stricter tier should have resolved it first')
+      }
+      if (wordHits.get(item.query) !== 0) {
+        problems.push(`subtoken hit for a spelling grep CAN see (${wordHits.get(item.query)} hits)`)
+      }
+    }
+    // Completeness for the exact tier, against the same oracle the main
+    // differential uses.
+    if (item.matchedOn === 'exact' && entry.definitionsTotal !== definitionRows.get(item.query)) {
+      problems.push(`definitions tool=${entry.definitionsTotal}`
+        + ` !== grep=${definitionRows.get(item.query)}`)
+    }
+    if (item.implSites !== undefined && entry.implsTotal !== item.implSites) {
+      problems.push(`implsTotal ${entry.implsTotal} !== ${item.implSites}`
+        + (item.matchedOn === 'subtoken-normalized'
+          ? ' — a looser tier inflated the impl set the `expect` gate compares against'
+          : ''))
+    }
+  }
+  if (problems.length === 0) {
+    oracle.pass += 1
+    console.log(`PASS  ${item.query.padEnd(20)} -> ${String(item.resolvesTo).padEnd(20)}`
+      + ` ${item.matchedOn}  ·  grep-word-hits=${wordHits.get(item.query)}`)
+  } else {
+    oracle.fail += 1
+    console.log(`FAIL  ${item.query.padEnd(20)} ${item.matchedOn}`)
+    for (const problem of problems) {
+      console.log(`        ${problem}`)
+      oracle.failures.push(`${item.query}: ${problem}`)
+    }
+  }
+}
+
+// The adjacent pairs, asserted against each other: a splitter that dropped a
+// trailing `s` would resolve both spellings to the same symbol and every
+// per-case assertion above would still be individually satisfiable.
+for (const [left, right] of [['list_user_profile', 'list_user_profiles'],
+  ['list_user_id', 'list_user_ids'], ['listUserProfile', 'listUserProfiles'],
+  ['listUserId', 'listUserIds']]) {
+  const leftEntry = oracleEntry(left)
+  const rightEntry = oracleEntry(right)
+  const distinct = leftEntry !== undefined && rightEntry !== undefined
+    && (leftEntry.status === 'absent' || rightEntry.status === 'absent'
+      || leftEntry.matchedName !== rightEntry.matchedName)
+  if (!distinct) {
+    oracle.fail += 1
+    console.log(`FAIL  ${left} / ${right} collapsed onto the same symbol`)
+    oracle.failures.push(`${left}/${right} collapsed`)
+  }
+}
+
+console.log('')
+console.log(`SUBTOKEN ORACLE RESULT: ${oracle.pass} pass, ${oracle.fail} fail`
+  + `  (${SUBTOKEN_CASES.length} cases)`)
+if (oracle.fail > 0) {
+  console.log('SUBTOKEN FAILURES:')
+  for (const failure of oracle.failures) console.log('  ' + failure)
   process.exitCode = 1
 }

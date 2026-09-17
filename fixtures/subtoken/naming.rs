@@ -5,13 +5,16 @@
 //   1. PAIRS THAT MEAN THE SAME THING AT A BOUNDARY. Rust is snake_case end to
 //      end, so inside a pure Rust tree a naming-convention mismatch never shows
 //      up. It shows up at every boundary — serde `rename_all`, JSON keys,
-//      `invoke("get_user_by_id")` string literals, generated bindings, TS↔Rust
-//      FFI, CLI flags — where the caller guesses `getUserById` for a symbol
-//      spelled `get_user_by_id`. Each pair below is exactly that guess.
+//      string-literal invocations, generated bindings, TS↔Rust FFI, CLI flags —
+//      where the caller writes a snake_case symbol in the camelCase spelling its
+//      binding uses. Each pair below is exactly that guess. (The guessed
+//      spellings are deliberately NOT written anywhere in this file, so "grep
+//      finds zero occurrences of the query" is a real statement and not a
+//      comment artefact.)
 //
-//   2. PAIRS THAT ONLY LOOK ALIKE. `list_user_profile` / `list_user_profiles`
-//      and `user_id` / `user_ids` must never collapse into one subtoken key, or
-//      a near-miss would be reported as a hit.
+//   2. PAIRS THAT ONLY LOOK ALIKE. The `list_user_profile` / `list_user_profiles`
+//      and `list_user_id` / `list_user_ids` pairs must never collapse into one
+//      subtoken key, or a near-miss would be reported as a hit.
 //
 // Kept Rust-only on purpose: `parity-check.mjs`'s oracle is GNU grep over
 // `--include=*.rs`, so a fixture that mixes languages would have to weaken the
