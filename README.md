@@ -84,7 +84,7 @@ Two consequences are built into this plugin:
 | coverage evidence | what was searched, what was pruned, what caps were hit |
 | text search | `query` for literal or regex, with an exact total |
 | mention sites | `mentions: true` instead of grepping for uses |
-| no re-walk cost | process-wide index pool; later questions are nearly free — and say how old the index is |
+| no re-walk cost | process-wide index pool; later questions revalidate cheaply instead of re-walking |
 | **drop-in `grep`/`glob`** | opt-in replacements that keep the built-in call shapes but carry scope evidence |
 
 Rust, TypeScript/JavaScript, Python and Go are indexed; the extension set is configurable.
@@ -246,24 +246,47 @@ list is capped and labelled like every other list (shown-of-total, then the rema
 candidate list can turn an `absent` into anything else. On the Zed checkout, twelve absent
 symbols cost 342 ms warm, alongside the mention scan that was already there.
 
-### The index says how old it is
+### The index revalidates itself, so an edit is never answered from a stale build
 
 The pool serves a build for `indexTtlMs` (10 minutes by default), so for that window an answer
-can predate the working tree. That was the one place the disclosure discipline broke: the report
-declared what it had not searched and hid nothing else, but it never said the answer could be
-older than the code — including an `absent` verdict carrying `coverage: complete`. Every reused
-answer now states the age of the build it came from and carries a staleness line:
+could predate the working tree. Disclosure was the first fix — the report states the build's age
+and never presents a negative as final *for the tree* when it is only final *for the build*:
 
 ```
-index crates@1789651513254: 2013 files, 73252 defs, 9355 impls (reused — built 1m30s ago)
-index staleness: a negative below is final for that build, not for the tree as it is now
+index crates@1789651513254: 2013 files, 73252 defs, 9355 impls
+  (reused — built 1m30s ago, revalidated against the tree just now)
 ```
 
-The verdict is deliberately **not** downgraded to `inconclusive`. The steady state is an agent
-asking several questions without editing anything, and making those negatives non-final would
-re-incite the re-checking loop the plugin exists to stop — the incident's 41 byte-identical
-repeats. Disclosure is the fix; `refresh: true` rebuilds on demand, and content-hash
-rebuild-on-change is a separate change that needs its own measurement.
+But disclosure alone still left a footgun, and the warning was the wrong shape of fix: the agent
+most likely to search next is the agent that just edited a file, and it has no reason to know the
+answer came from a cache. So a **reused** index now re-checks itself against the working tree
+before it answers, and rebuilds when anything moved:
+
+```
+index crates@1789651513254: 2013 files, 73252 defs, 9355 impls
+  (rebuilt — the pooled build was stale, the tree had changed since it was built)
+```
+
+- `ctx.fs.stat` hands out a `version` freshness token, composed by the local backend from
+  `dev:ino:size:mtimeNs:ctimeNs`, so the comparison is exact rather than heuristic. Files **and
+  directories** are stamped: a directory's version moves when an entry is added, removed or
+  renamed, which is the case a per-file mtime check cannot see — an agent that creates a new file
+  and then asks whether its symbol exists is the same footgun one step earlier.
+- The check is bounded by the index (one stat per indexed file plus one per directory walked),
+  short-circuits on the first mismatch, and runs only when a pooled build is about to answer; a
+  cold build needs no check because it just read the tree. On the Zed checkout it costs **9 ms**
+  for 2,013 files — 1.2% of the 778 ms cold build — and detection-plus-rebuild after an edit is
+  ~700 ms, once.
+- `refresh: true` still forces a rebuild, and is now only needed to override a *policy* change
+  (a different `excludeDirs`, say) rather than to pick up an edit.
+- If a backend's `stat` reports no `version`, the build cannot be *proven* current, so the report
+  falls back to the older age disclosure verbatim rather than asserting currency it cannot check:
+  `index staleness: a negative below is final for that build, not for the tree as it is now`.
+
+The verdict is still deliberately **not** downgraded to `inconclusive`: revalidation is the fix,
+and the steady state — several questions with no edit in between — keeps its final negatives.
+
+Reproduce the numbers with `node measure-revalidation.mjs`.
 
 ## Verified against GNU grep
 
@@ -333,6 +356,9 @@ Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms,
 - **Subtoken hits under-report impls.** A symbol reached through the convention tier reports its
   definitions and no impl sites, because widening the impl set is what could corrupt the `expect`
   gate. Ask with the spelling that is actually defined to see the impls.
+- **Revalidation costs one stat per indexed file.** 9 ms for 2,013 files, so it is paid on every
+  warm call rather than only on a miss. It scales with the tree, and it is the price of never
+  answering a negative from a build the tree has moved past.
 - Impls for concrete types produced by a derive macro are not visible to a syntactic indexer.
 
 ## Measured and not landed: occurrence postings

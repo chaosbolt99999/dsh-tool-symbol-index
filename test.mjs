@@ -809,12 +809,15 @@ test('a reused index discloses its age; a fresh build claims none', async () => 
     assert.ok(second.index.ageMs >= 90_000, 'disclosed age ' + second.index.ageMs)
     const warmText = tool.output.render({}, second)[0].text
     assert.match(warmText, /reused — built 1m3\ds ago/)
-    // The dangerous case: an absent verdict reached through a REUSED index is
-    // accompanied by the age and the staleness line — the verdict itself stays
-    // `absent` (accompanied, not downgraded; see INDEX_STALENESS_NOTE).
+    // The reused build is revalidated before it answers, so the negative below
+    // is final for the tree as it is NOW — not merely for the build. The old
+    // unconditional staleness warning is therefore gone, and `validated` says so.
+    assert.equal(second.index.validated, true)
+    assert.equal(second.index.staleRebuilt, false)
+    assert.match(warmText, /reused — built 1m3\ds ago, revalidated against the tree just now/)
     assert.equal(second.symbols[1].status, 'absent')
     assert.match(warmText, /verdict \[absent\]/)
-    assert.match(warmText, /index staleness: a negative below is final for that build, not for the tree as it is now/)
+    assert.doesNotMatch(warmText, /index staleness/)
   } finally {
     Date.now = realNow
   }
@@ -822,7 +825,7 @@ test('a reused index discloses its age; a fresh build claims none', async () => 
 })
 
 evictIndexes()
-test('the replacement grep carries the same index-age disclosure', async () => {
+test('the replacement grep revalidates its index too, and says so', async () => {
   const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n' })
   const { capturedAll } = await loadTool(MODULE, { provideSearchTools: true })
   const grep = capturedAll.find(entry => entry.name === 'grep')
@@ -836,12 +839,148 @@ test('the replacement grep carries the same index-age disclosure', async () => {
     const warm = await grep.execute({ pattern: 'alpha', path: root }, mockExec(root))
     assert.equal(warm.index.reused, true)
     assert.ok(warm.index.ageMs >= 120_000, 'disclosed age ' + warm.index.ageMs)
+    assert.equal(warm.index.validated, true)
     assert.deepEqual(validateSubset(grep.output.schema, warm), [])
     assert.match(grep.output.render({}, warm)[0].text,
-      /index staleness: a negative below is final for that build/)
+      /reused — built 2m0s ago, revalidated against the tree just now/)
   } finally {
     Date.now = realNow
   }
+  rmSync(root, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// v2.2: write-triggered invalidation. Disclosure alone left the footgun: the
+// agent most likely to search next is the one that just edited a file, and it
+// has no reason to know the answer came from a cache. Every test below runs
+// WITHOUT `refresh: true`, which is the point.
+// ---------------------------------------------------------------------------
+
+evictIndexes()
+test('editing an indexed file is picked up without `refresh: true`', async () => {
+  const root = fixtureTree({ 'lib.rs': 'pub fn alpha() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+
+  // The footgun's setup: this negative is correct when it is made.
+  const before = await tool.execute({ symbols: ['gamma'], path: root }, mockExec(root))
+  assert.equal(before.symbols[0].status, 'absent')
+  assert.equal(before.index.reused, false)
+
+  writeFileSync(join(root, 'lib.rs'), 'pub fn alpha() {}\npub fn gamma() {}\n')
+  const after = await tool.execute({ symbols: ['gamma'], path: root }, mockExec(root))
+  assert.equal(after.index.staleRebuilt, true, 'the pooled build must be rejected, not answered from')
+  assert.equal(after.index.reused, false)
+  assert.equal(after.symbols[0].status, 'defined')
+  assert.match(tool.output.render({}, after)[0].text, /rebuilt — the pooled build was stale/)
+
+  // A stale POSITIVE is the same defect inverted, and is caught by the same
+  // check: the symbol is gone from the tree, so it must be gone from the answer.
+  writeFileSync(join(root, 'lib.rs'), 'pub fn alpha() {}\n')
+  const removed = await tool.execute({ symbols: ['gamma'], path: root }, mockExec(root))
+  assert.equal(removed.index.staleRebuilt, true)
+  assert.equal(removed.symbols[0].status, 'absent')
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a NEW file under the root is detected, not just an edited one', async () => {
+  // This is the case a per-file mtime check cannot see: nothing that was indexed
+  // changed. Only the directory's own version moved.
+  const root = fixtureTree({ 'lib.rs': 'pub fn alpha() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+
+  const before = await tool.execute({ symbols: ['delta'], path: root }, mockExec(root))
+  assert.equal(before.symbols[0].status, 'absent')
+
+  writeFileSync(join(root, 'extra.rs'), 'pub fn delta() {}\n')
+  const after = await tool.execute({ symbols: ['delta'], path: root }, mockExec(root))
+  assert.equal(after.index.staleRebuilt, true, 'a created file must invalidate the pooled build')
+  assert.equal(after.symbols[0].status, 'defined')
+  assert.equal(after.index.files, 2)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a DELETED file is detected', async () => {
+  const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n', 'b.rs': 'pub fn beta() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+  const before = await tool.execute({ symbols: ['beta'], path: root }, mockExec(root))
+  assert.equal(before.symbols[0].status, 'defined')
+
+  rmSync(join(root, 'b.rs'))
+  const after = await tool.execute({ symbols: ['beta'], path: root }, mockExec(root))
+  assert.equal(after.index.staleRebuilt, true)
+  assert.equal(after.symbols[0].status, 'absent')
+  assert.equal(after.index.files, 1)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('an unchanged tree is NOT rebuilt — revalidation is not a rebuild-per-call', async () => {
+  const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+  const first = await tool.execute({ symbols: ['alpha'], path: root }, mockExec(root))
+  for (let round = 0; round < 3; round += 1) {
+    const again = await tool.execute({ symbols: ['alpha'], path: root }, mockExec(root))
+    assert.equal(again.index.reused, true, 'round ' + round)
+    assert.equal(again.index.staleRebuilt, false)
+    assert.equal(again.index.validated, true)
+    assert.equal(again.index.id, first.index.id, 'the same build answered every round')
+  }
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('a backend with no freshness token keeps the age disclosure instead of claiming currency', async () => {
+  // Honest fallback: if `stat` cannot report a version, the build cannot be
+  // PROVEN current, so the report falls back to disclosing its age rather than
+  // asserting it is up to date.
+  const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n' })
+  const versionlessFs = {
+    async resolve(path, opts) { return realFs.resolve(path, opts) },
+    processPath(t) { return realFs.processPath(t) },
+    async stat(t) {
+      const info = await realFs.stat(t)
+      return info === undefined ? undefined : { ...info, version: undefined }
+    },
+    async listDir(t) { return realFs.listDir(t) },
+    async readText(t) { return realFs.readText(t) },
+  }
+  const { tool } = await loadTool(MODULE, {}, versionlessFs)
+  const first = await tool.execute({ symbols: ['alpha'], path: root }, mockExec(root))
+  assert.equal(first.index.validated, true, 'a cold build is current by construction')
+
+  const second = await tool.execute({ symbols: ['alpha', 'Nope'], path: root }, mockExec(root))
+  assert.equal(second.index.reused, true)
+  assert.equal(second.index.validated, false)
+  const text = tool.output.render({}, second)[0].text
+  assert.match(text, /reused — built [\d.]+m?s ago\)/)
+  assert.match(text, /index staleness: a negative below is final for that build/)
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the replacement glob revalidates its walk, so `complete` is never stale', async () => {
+  const root = fixtureTree({ 'src/a.rs': 'fn a() {}\n' })
+  const { capturedAll } = await loadTool(MODULE, { provideSearchTools: true })
+  const glob = capturedAll.find(entry => entry.name === 'glob')
+
+  const before = await glob.execute({ pattern: '**/*.rs', path: root }, mockExec(root))
+  assert.deepEqual(before.paths, ['src/a.rs'])
+  assert.equal(before.walk.reused, false)
+
+  writeFileSync(join(root, 'src/b.rs'), 'fn b() {}\n')
+  const after = await glob.execute({ pattern: '**/*.rs', path: root }, mockExec(root))
+  assert.equal(after.walk.staleRebuilt, true)
+  assert.deepEqual(after.paths, ['src/a.rs', 'src/b.rs'])
+  assert.match(glob.output.render({}, after)[0].text, /^coverage: /m)
+  assert.deepEqual(validateSubset(glob.output.schema, after), [])
+
+  // And an unchanged tree still reuses the walk without rebuilding it.
+  const again = await glob.execute({ pattern: '**/*.rs', path: root }, mockExec(root))
+  assert.equal(again.walk.reused, true)
+  assert.equal(again.walk.validated, true)
+  assert.equal(again.walk.staleRebuilt, false)
   rmSync(root, { recursive: true, force: true })
 })
 

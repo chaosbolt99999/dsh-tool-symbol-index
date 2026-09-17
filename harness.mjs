@@ -49,6 +49,16 @@ function target(path) {
   return { targetKey: canonical, path: canonical }
 }
 
+/**
+ * The local backend's freshness token, mirrored exactly
+ * (`packages/fs/fs-local/src/fsio.ts` `versionOf`). A token coarser than this —
+ * bare `mtimeMs`, say — would let a test pass while an edit made inside the same
+ * millisecond went undetected, which is the property under test.
+ */
+function versionOf(info) {
+  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
+}
+
 /** A `ctx.fs` equivalent backed by the real filesystem, matching the host contract. */
 export const realFs = {
   async resolve(path, opts = {}) {
@@ -61,23 +71,38 @@ export const realFs = {
   },
   async stat(t) {
     try {
-      const info = statSync(t.path)
+      const info = statSync(t.path, { bigint: true })
       return {
-        version: String(info.mtimeMs),
+        version: versionOf(info),
         type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other',
-        size: info.isFile() ? info.size : undefined,
+        size: info.isFile() ? Number(info.size) : undefined,
       }
     } catch {
       return undefined
     }
   },
   async listDir(t) {
+    // Mirrors the real backend, which probes each child and returns `version`
+    // (and `size` for files) on the entry — a listing is where the glob
+    // replacement gets its freshness tokens without a second stat per file.
     return readdirSync(t.path, { withFileTypes: true })
-      .map(entry => ({
-        name: entry.name,
-        type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
-        target: target(join(t.path, entry.name)),
-      }))
+      .map(entry => {
+        const child = target(join(t.path, entry.name))
+        let info
+        try {
+          info = statSync(child.path, { bigint: true })
+        } catch {
+          info = undefined
+        }
+        const type = entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other'
+        return {
+          name: entry.name,
+          type,
+          target: child,
+          ...(info === undefined ? {} : { version: versionOf(info) }),
+          ...(info !== undefined && type === 'file' ? { size: Number(info.size) } : {}),
+        }
+      })
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   },
   async readText(t) {
@@ -219,13 +244,13 @@ export function mockExec(cwd) {
 }
 
 /** Load the plugin with a given config and return its captured tool. */
-export async function loadTool(modulePath, config = {}) {
+export async function loadTool(modulePath, config = {}, fs = realFs) {
   const module = await import(pathToFileURL(modulePath).href)
   const validated = module.Config['~standard'].validate(config)
   if (validated.issues !== undefined) {
     throw new Error('config rejected: ' + JSON.stringify(validated.issues))
   }
-  const { ctx, captured } = mockContext()
+  const { ctx, captured } = mockContext(fs)
   module.apply(ctx, validated.value)
   return { tool: captured.tool, sections: captured.sections, module, capturedAll: captured.all ?? [captured.tool] }
 }
