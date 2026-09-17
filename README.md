@@ -335,6 +335,27 @@ Measured on the same inputs: cold index 0.7 s for 2,013 files, warm query ~0 ms,
   gate. Ask with the spelling that is actually defined to see the impls.
 - Impls for concrete types produced by a derive macro are not visible to a syntactic indexer.
 
+## Measured and not landed: occurrence postings
+
+`scanText` re-reads every indexed file for `mentions: true` and for every unresolved symbol's
+negative check — 2,013 file reads per call on the Zed checkout, paid again on each call. A
+postings index built during the walk (where the text is already in memory) would cut that to the
+files that actually match. `measure-postings.mjs` builds that prototype and measures it; the
+numbers and the reasoning are in [`MEASUREMENT-postings.md`](MEASUREMENT-postings.md).
+
+The short version: postings with line numbers cost **+64.3 MB per index** — 53% on top of a
+121.9 MB index, in a pool that holds up to eight of them — and the line numbers are data the
+mention path never uses, because the count and the site text both come from re-reading the
+candidate files anyway. So the specified design fails its own memory gate. Dropping the line
+numbers costs +25.2 MB with no build-time regression and identical counts, but that is a
+different change. Either way the win is ~100× on rare and absent needles and ~1.05× on ubiquitous
+ones — in absolute terms about 100 ms per scan — against a rewrite of the code path whose whole
+job is keeping a negative honest.
+
+Both designs preserve the true substring count (`mentions.count` is not a token count): the
+measurement reports **0 count mismatches** on every needle shape, including snake_case and a
+path-qualified query.
+
 ## Configuration
 
 Every cap is optional and overridable per row: `toolName`, `provideSearchTools`, `guidanceSection`, `roots`,
