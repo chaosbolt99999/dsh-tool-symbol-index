@@ -777,3 +777,70 @@ test('the replacement glob serves the walked files and explains exclusions', asy
   assert.match(text, /^coverage: /m)
   rmSync(root, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// v2.1: index-age disclosure.
+// ---------------------------------------------------------------------------
+
+evictIndexes()
+test('a reused index discloses its age; a fresh build claims none', async () => {
+  // The pool serves a build for indexTtlMs (10 minutes), so an edit inside that
+  // window is invisible and an `absent` verdict can be final for a tree that no
+  // longer exists. Date.now is driven here so the disclosed age is asserted
+  // exactly rather than "some number went up".
+  const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n' })
+  const { tool } = await loadTool(MODULE, {})
+
+  const realNow = Date.now
+  let offset = 0
+  Date.now = () => realNow() + offset
+  try {
+    const first = await tool.execute({ symbols: ['alpha'], path: root }, mockExec(root))
+    assert.equal(first.index.reused, false)
+    assert.equal(first.index.ageMs, 0, 'a build this same call performed has no age to disclose')
+    const freshText = tool.output.render({}, first)[0].text
+    assert.match(freshText, /\(built in \d+ms\)/)
+    assert.doesNotMatch(freshText, /index staleness/)
+
+    offset = 90_000
+    const second = await tool.execute(
+      { symbols: ['alpha', 'NotDefinedAnywhere'], path: root }, mockExec(root))
+    assert.equal(second.index.reused, true)
+    assert.ok(second.index.ageMs >= 90_000, 'disclosed age ' + second.index.ageMs)
+    const warmText = tool.output.render({}, second)[0].text
+    assert.match(warmText, /reused — built 1m3\ds ago/)
+    // The dangerous case: an absent verdict reached through a REUSED index is
+    // accompanied by the age and the staleness line — the verdict itself stays
+    // `absent` (accompanied, not downgraded; see INDEX_STALENESS_NOTE).
+    assert.equal(second.symbols[1].status, 'absent')
+    assert.match(warmText, /verdict \[absent\]/)
+    assert.match(warmText, /index staleness: a negative below is final for that build, not for the tree as it is now/)
+  } finally {
+    Date.now = realNow
+  }
+  rmSync(root, { recursive: true, force: true })
+})
+
+evictIndexes()
+test('the replacement grep carries the same index-age disclosure', async () => {
+  const root = fixtureTree({ 'a.rs': 'pub fn alpha() {}\n' })
+  const { capturedAll } = await loadTool(MODULE, { provideSearchTools: true })
+  const grep = capturedAll.find(entry => entry.name === 'grep')
+
+  const realNow = Date.now
+  let offset = 0
+  Date.now = () => realNow() + offset
+  try {
+    await grep.execute({ pattern: 'alpha', path: root }, mockExec(root))
+    offset = 120_000
+    const warm = await grep.execute({ pattern: 'alpha', path: root }, mockExec(root))
+    assert.equal(warm.index.reused, true)
+    assert.ok(warm.index.ageMs >= 120_000, 'disclosed age ' + warm.index.ageMs)
+    assert.deepEqual(validateSubset(grep.output.schema, warm), [])
+    assert.match(grep.output.render({}, warm)[0].text,
+      /index staleness: a negative below is final for that build/)
+  } finally {
+    Date.now = realNow
+  }
+  rmSync(root, { recursive: true, force: true })
+})

@@ -84,7 +84,7 @@ Two consequences are built into this plugin:
 | coverage evidence | what was searched, what was pruned, what caps were hit |
 | text search | `query` for literal or regex, with an exact total |
 | mention sites | `mentions: true` instead of grepping for uses |
-| no re-walk cost | process-wide index pool; later questions are nearly free |
+| no re-walk cost | process-wide index pool; later questions are nearly free — and say how old the index is |
 | **drop-in `grep`/`glob`** | opt-in replacements that keep the built-in call shapes but carry scope evidence |
 
 Rust, TypeScript/JavaScript, Python and Go are indexed; the extension set is configurable.
@@ -189,6 +189,25 @@ the nearest existing directory and its closest names — never an empty result. 
 zero ingested files, from a capped index, or with unreadable files is `inconclusive`, never
 `absent`. A disclosed policy omission (a pruned `target/`) stays a final `absent`, because the
 caller can see it and override it with `includeExcluded: true`.
+
+### The index says how old it is
+
+The pool serves a build for `indexTtlMs` (10 minutes by default), so for that window an answer
+can predate the working tree. That was the one place the disclosure discipline broke: the report
+declared what it had not searched and hid nothing else, but it never said the answer could be
+older than the code — including an `absent` verdict carrying `coverage: complete`. Every reused
+answer now states the age of the build it came from and carries a staleness line:
+
+```
+index crates@1789651513254: 2013 files, 73252 defs, 9355 impls (reused — built 1m30s ago)
+index staleness: a negative below is final for that build, not for the tree as it is now
+```
+
+The verdict is deliberately **not** downgraded to `inconclusive`. The steady state is an agent
+asking several questions without editing anything, and making those negatives non-final would
+re-incite the re-checking loop the plugin exists to stop — the incident's 41 byte-identical
+repeats. Disclosure is the fix; `refresh: true` rebuilds on demand, and content-hash
+rebuild-on-change is a separate change that needs its own measurement.
 
 ## Verified against GNU grep
 
